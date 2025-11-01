@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Treasure Ship Game - Three.js</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #111; }
+        #gameCanvas { display: block; }
+        #hud {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: Arial, sans-serif;
+            font-size: 20px;
+            z-index: 10;
+        }
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            font-family: Arial, sans-serif;
+            font-size: 40px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            z-index: 20;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+    <div id="hud">Score: <span id="score">0</span> | Lives: <span id="lives">3</span></div>
+    <div id="overlay">
+        <h1>Press S to Start</h1>
+    </div>
+    <script>
+        // --- Global Variables ---
+        let scene, camera, renderer;
+        let ship, treasure, plane;
+        let score = 0;
+        let lives = 3;
+        let gameState = 'start'; // 'start', 'playing', 'gameOver'
+
+        const SHIP_SPEED = 0.5;
+        const PLANE_SIZE = 100;
+        const SHIP_START_POS = new THREE.Vector3(0, 1.5, 0);
+
+        // Movement flags
+        const keys = {
+            forward: false, backward: false, left: false, right: false
+        };
+
+        const hudScore = document.getElementById('score');
+        const hudLives = document.getElementById('lives');
+        const overlay = document.getElementById('overlay');
+        const overlayText = document.querySelector('#overlay h1');
+
+        // --- Initialization ---
+        function init() {
+            // 1. Scene Setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87ceeb); // Light blue sky
+
+            // 2. Camera Setup
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 40, 50);
+            camera.lookAt(0, 0, 0); // Look down at the center of the plane
+
+            // 3. Renderer Setup
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            // 4. Lighting
+            const ambientLight = new THREE.AmbientLight(0x404040, 5); // Soft white light
+            scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 2);
+            directionalLight.position.set(20, 50, 20);
+            scene.add(directionalLight);
+
+            // 5. Create Game Objects
+            createPlane();
+            createShip();
+            createTreasure();
+
+            // 6. Event Listeners
+            window.addEventListener('resize', onWindowResize, false);
+            document.addEventListener('keydown', onKeyDown, false);
+            document.addEventListener('keyup', onKeyUp, false);
+
+            // 7. Start the game loop
+            animate();
+        }
+
+        // --- Game Object Creation ---
+        function createPlane() {
+            const geometry = new THREE.PlaneGeometry(PLANE_SIZE, PLANE_SIZE);
+            const material = new THREE.MeshLambertMaterial({ color: 0x0088ff, side: THREE.DoubleSide }); // Ocean color
+            plane = new THREE.Mesh(geometry, material);
+            plane.rotation.x = Math.PI / 2; // Rotate to be flat on the ground
+            scene.add(plane);
+        }
+
+        function createShip() {
+            // Simple box model for the ship
+            const geometry = new THREE.BoxGeometry(3, 3, 5);
+            const material = new THREE.MeshLambertMaterial({ color: 0xff0000 }); // Red ship
+            ship = new THREE.Mesh(geometry, material);
+            ship.position.copy(SHIP_START_POS);
+            ship.rotation.y = Math.PI; // Face the right way initially
+            scene.add(ship);
+        }
+
+        function createTreasure() {
+            // Simple cube model for the treasure chest
+            const geometry = new THREE.BoxGeometry(2, 2, 2);
+            const material = new THREE.MeshPhongMaterial({ color: 0xffff00 }); // Yellow/Gold
+            treasure = new THREE.Mesh(geometry, material);
+            respawnTreasure(); // Place it randomly
+            scene.add(treasure);
+        }
+
+        function respawnTreasure() {
+            // Generate random coordinates within the plane bounds (-PLANE_SIZE/2 to PLANE_SIZE/2)
+            const x = (Math.random() - 0.5) * (PLANE_SIZE - 5);
+            const z = (Math.random() - 0.5) * (PLANE_SIZE - 5);
+            treasure.position.set(x, 1, z);
+        }
+
+        // --- Game Logic ---
+        function updateHud() {
+            hudScore.textContent = score;
+            hudLives.textContent = lives;
+        }
+
+        function handleMovement() {
+            let moved = false;
+            // WASD and Arrow Keys for directional movement
+            if (keys.forward) { ship.position.z -= SHIP_SPEED; moved = true; }
+            if (keys.backward) { ship.position.z += SHIP_SPEED; moved = true; }
+            if (keys.left) { ship.position.x -= SHIP_SPEED; moved = true; }
+            if (keys.right) { ship.position.x += SHIP_SPEED; moved = true; }
+
+            // Simple turning visualization (optional but makes it look better)
+            if(moved) {
+                // Calculate direction vector and use it to set rotation
+                const direction = new THREE.Vector3(
+                    (keys.right ? 1 : 0) - (keys.left ? 1 : 0),
+                    0,
+                    (keys.backward ? 1 : 0) - (keys.forward ? 1 : 0)
+                ).normalize();
+
+                if (direction.lengthSq() > 0) {
+                    const targetAngle = Math.atan2(direction.x, direction.z);
+                    ship.rotation.y = targetAngle;
+                }
+            }
+
+            // Keep the ship above the plane
+            ship.position.y = SHIP_START_POS.y;
+
+            // Update camera position to follow the ship from a fixed offset
+            camera.position.x = ship.position.x;
+            camera.position.z = ship.position.z + 50;
+            camera.lookAt(ship.position.x, 0, ship.position.z);
+        }
+
+        function checkBoundaryCollision() {
+            const halfPlane = PLANE_SIZE / 2;
+            const pos = ship.position;
+
+            // Check if ship position exceeds the bounds (-halfPlane to +halfPlane)
+            if (pos.x < -halfPlane || pos.x > halfPlane || pos.z < -halfPlane || pos.z > halfPlane) {
+                lives--;
+                updateHud();
+
+                // Reset ship position
+                ship.position.copy(SHIP_START_POS);
+
+                if (lives <= 0) {
+                    endGame();
+                } else {
+                    console.log("Out of bounds! Lives left: " + lives);
+                }
+            }
+        }
+
+        function checkTreasureCollision() {
+            // Simple bounding box collision check
+            // Distance between ship and treasure centers
+            const distance = ship.position.distanceTo(treasure.position);
+
+            // Approximate sum of object radii/half-widths (ship half-width ~2.5, treasure half-width ~1)
+            const collisionThreshold = 3.5;
+
+            if (distance < collisionThreshold) {
+                score++;
+                updateHud();
+                respawnTreasure();
+                console.log("Treasure collected! Score: " + score);
+            }
+        }
+
+        // --- Game State Functions ---
+        function startGame() {
+            gameState = 'playing';
+            overlay.style.display = 'none';
+            score = 0;
+            lives = 3;
+            updateHud();
+            ship.position.copy(SHIP_START_POS);
+            respawnTreasure();
+        }
+
+        function endGame() {
+            gameState = 'gameOver';
+            overlayText.innerHTML = `Game Over! Score: ${score}<br>Press S to Restart`;
+            overlay.style.display = 'flex';
+        }
+
+        // --- Event Handlers ---
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function onKeyDown(event) {
+            switch (event.key.toUpperCase()) {
+                case 'W':
+                case 'ARROWUP':
+                    keys.forward = true;
+                    break;
+                case 'S':
+                case 'ARROWDOWN':
+                    if (gameState !== 'playing') {
+                        startGame();
+                    }
+                    keys.backward = true;
+                    break;
+                case 'A':
+                case 'ARROWLEFT':
+                    keys.left = true;
+                    break;
+                case 'D':
+                case 'ARROWRIGHT':
+                    keys.right = true;
+                    break;
+            }
+        }
+
+        function onKeyUp(event) {
+            switch (event.key.toUpperCase()) {
+                case 'W':
+                case 'ARROWUP':
+                    keys.forward = false;
+                    break;
+                case 'S':
+                case 'ARROWDOWN':
+                    keys.backward = false;
+                    break;
+                case 'A':
+                case 'ARROWLEFT':
+                    keys.left = false;
+                    break;
+                case 'D':
+                case 'ARROWRIGHT':
+                    keys.right = false;
+                    break;
+            }
+        }
+
+        // --- Main Game Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (gameState === 'playing') {
+                handleMovement();
+                checkBoundaryCollision();
+                checkTreasureCollision();
+
+                // Simple treasure rotation for visual interest
+                treasure.rotation.y += 0.02;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // Start the process when the script loads
+        init();
+    </script>
+</body>
+</html>
