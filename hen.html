@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Hen & Egg Catcher</title>
+    <!-- Load Three.js library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Load Tailwind CSS for simple, clean UI -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for the 3D canvas and UI */
+        body {
+            margin: 0;
+            overflow: hidden; /* Hide scrollbars */
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117;
+        }
+        canvas {
+            display: block;
+        }
+        #gameContainer {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+        /* Overlay sits on top of the 3D scene */
+        .game-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            pointer-events: none; /* Allows clicks to pass through to the canvas/controls */
+        }
+    </style>
+</head>
+<body>
+
+    <div id="gameContainer">
+        <!-- Overlay for Score, Lives, and Messages -->
+        <div class="game-overlay flex flex-col items-center p-6">
+            <!-- Score and Lives HUD -->
+            <div id="hud" class="text-white text-xl font-bold p-4 bg-gray-800/70 rounded-lg shadow-xl flex justify-between w-full max-w-sm" style="display: none;">
+                <span id="scoreDisplay">Score: 0</span>
+                <span id="livesDisplay">Lives: 3</span>
+            </div>
+
+            <!-- Start/Game Over Screen -->
+            <div id="messageScreen" class="flex-grow flex items-center justify-center">
+                <div class="p-8 bg-indigo-700/90 backdrop-blur-sm rounded-xl shadow-2xl text-white text-center border-4 border-indigo-300 transform transition duration-500 ease-in-out scale-100">
+                    <h1 class="text-5xl font-extrabold mb-4" id="mainMessage">3D Egg Catcher</h1>
+                    <p class="text-xl font-medium mb-6" id="subMessage">Catch the eggs the hen drops!</p>
+                    <p class="text-2xl font-black bg-yellow-400 text-indigo-900 p-3 rounded-md animate-pulse shadow-lg">
+                        Press S to Start
+                    </p>
+                    <div class="mt-8 text-sm text-gray-200">
+                        <p>Controls: A/D or Arrow Keys to move basket.</p>
+                        <p>Click or Spacebar to make the hen lay an egg.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // --- Global Three.js and Game State Variables ---
+        let scene, camera, renderer;
+        let basket, henGroup;
+        const eggPool = []; // Pool for recycling egg meshes to save performance
+
+        // Game state constants and variables
+        const GAME_STATE = {
+            START: 'START',
+            PLAYING: 'PLAYING',
+            GAME_OVER: 'GAME_OVER'
+        };
+        let gameState = GAME_STATE.START;
+        let score = 0;
+        let lives = 3;
+
+        // Game parameters
+        const GRAVITY = -0.015; // Simple downward acceleration value
+        const BASKET_SPEED = 0.25;
+        const EGG_DROP_INTERVAL = 1000; // Minimum time between manual egg drops (ms)
+        let lastEggDropTime = 0;
+
+        // Geometry dimensions
+        const GROUND_SIZE = 40;
+        const BASKET_WIDTH = 5;
+        const BASKET_HEIGHT = 1.5;
+        const BASKET_DEPTH = 3;
+        const EGG_RADIUS = 0.6;
+        const HEN_Y = 10; // Fixed height of the hen/rod
+
+        // UI elements references
+        const hud = document.getElementById('hud');
+        const scoreDisplay = document.getElementById('scoreDisplay');
+        const livesDisplay = document.getElementById('livesDisplay');
+        const messageScreen = document.getElementById('messageScreen');
+        const mainMessage = document.getElementById('mainMessage');
+        const subMessage = document.getElementById('subMessage');
+        const gameContainer = document.getElementById('gameContainer');
+
+        // --- Core 3D Object Creation Functions ---
+
+        /** Creates a simple hen model using two cubes. */
+        function createHen() {
+            const hen = new THREE.Group();
+
+            // Body (Red cube)
+            const bodyGeometry = new THREE.BoxGeometry(2, 2, 2);
+            const bodyMaterial = new THREE.MeshPhongMaterial({ color: 0xcc0000 });
+            const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+            body.position.set(0, 1.5, 0);
+            hen.add(body);
+
+            // Head (White cube)
+            const headGeometry = new THREE.BoxGeometry(1, 1, 1);
+            const headMaterial = new THREE.MeshPhongMaterial({ color: 0xffffff });
+            const head = new THREE.Mesh(headGeometry, headMaterial);
+            head.position.set(0, 3, 0);
+            hen.add(head);
+
+            // Set the hen's initial position on the rod
+            hen.position.set(0, HEN_Y, 0);
+            return hen;
+        }
+
+        /** Creates the player's basket (a simple brown cube). */
+        function createBasket() {
+            const geometry = new THREE.BoxGeometry(BASKET_WIDTH, BASKET_HEIGHT, BASKET_DEPTH);
+            const material = new THREE.MeshPhongMaterial({ color: 0x8b4513 }); // Brown color
+            const mesh = new THREE.Mesh(geometry, material);
+
+            // Position it on the ground (Y=0)
+            mesh.position.set(0, BASKET_HEIGHT / 2, 0);
+
+            // Create and store the bounding box for collision detection
+            mesh.userData.bbox = new THREE.Box3().setFromObject(mesh);
+
+            return mesh;
+        }
+
+        /** Gets an egg mesh, either by reusing one from the pool or creating a new one. */
+        function getEgg() {
+            let egg;
+            if (eggPool.length > 0) {
+                // Reuse an existing egg (performance optimization)
+                egg = eggPool.pop();
+                egg.visible = true;
+            } else {
+                // Create a new egg (sphere)
+                const geometry = new THREE.SphereGeometry(EGG_RADIUS, 16, 16);
+                const material = new THREE.MeshPhongMaterial({ color: 0xeeeeee }); // White
+                egg = new THREE.Mesh(geometry, material);
+                // Attach userData for physics and collision
+                egg.userData.bbox = new THREE.Box3(); 
+                egg.userData.velocity = new THREE.Vector3(0, 0, 0);
+                scene.add(egg);
+            }
+
+            // Reset properties and position it below the hen
+            egg.position.copy(henGroup.position);
+            egg.position.y -= 2;
+            egg.userData.velocity.set(0, 0, 0);
+            return egg;
+        }
+
+        /** Hides an egg and returns it to the pool for later reuse. */
+        function recycleEgg(egg) {
+            egg.visible = false;
+            eggPool.push(egg);
+        }
+
+        // --- UI and State Management Functions ---
+
+        /** Updates the score and lives display on the HUD. */
+        function updateHUD() {
+            scoreDisplay.textContent = `Score: ${score}`;
+            livesDisplay.textContent = `Lives: ${lives}`;
+        }
+
+        /** Resets the game state and starts playing. */
+        function startGame() {
+            if (gameState !== GAME_STATE.PLAYING) {
+                // Clear all active eggs from the scene and pool
+                scene.children.filter(obj => obj.userData.velocity && obj.visible).forEach(recycleEgg);
+
+                score = 0;
+                lives = 3;
+                gameState = GAME_STATE.PLAYING;
+                lastEggDropTime = performance.now(); // Reset drop timer
+
+                // Update UI
+                updateHUD();
+                messageScreen.style.display = 'none';
+                hud.style.display = 'flex';
+            }
+        }
+
+        /** Sets the game state to Game Over and shows the message screen. */
+        function gameOver() {
+            gameState = GAME_STATE.GAME_OVER;
+
+            // Show Game Over message
+            mainMessage.textContent = "Game Over!";
+            subMessage.textContent = `Final Score: ${score}`;
+            
+            // Update the restart instruction text
+            const startButton = messageScreen.querySelector('.text-2xl');
+            if(startButton) {
+                startButton.textContent = "Press S to Restart";
+            }
+            messageScreen.style.display = 'flex';
+            hud.style.display = 'none';
+        }
+
+        // --- Initialization and Scene Setup ---
+
+        function init() {
+            // 1. Scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x334155); // Dark background
+
+            // 2. Camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 10, 20);
+            camera.lookAt(0, 5, 0);
+
+            // 3. Renderer
+            const container = document.getElementById('gameContainer');
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(renderer.domElement);
+
+            // 4. Lighting
+            const ambientLight = new THREE.AmbientLight(0x404040, 5);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 2);
+            directionalLight.position.set(5, 15, 8);
+            scene.add(directionalLight);
+
+            // 5. Ground Plane
+            const groundGeometry = new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE);
+            const groundMaterial = new THREE.MeshPhongMaterial({ color: 0x22c55e, side: THREE.DoubleSide }); // Green
+            const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+            ground.rotation.x = -Math.PI / 2;
+            ground.position.y = 0;
+            scene.add(ground);
+
+            // 6. Rod/Perch for Hen
+            const rodGeometry = new THREE.BoxGeometry(10, 0.5, 0.5);
+            const rodMaterial = new THREE.MeshPhongMaterial({ color: 0x581c87 }); // Purple
+            const rod = new THREE.Mesh(rodGeometry, rodMaterial);
+            rod.position.set(0, HEN_Y, 0);
+            scene.add(rod);
+
+            // 7. Hen (dropping point)
+            henGroup = createHen();
+            scene.add(henGroup);
+
+            // 8. Basket (Player)
+            basket = createBasket();
+            scene.add(basket);
+
+            // 9. Input and Resize Handlers
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('click', onLayEgg);
+            window.addEventListener('resize', onWindowResize);
+
+            // Start the animation loop
+            animate();
+        }
+
+        /** Handles window resizing. */
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- Gameplay Loop Functions ---
+
+        /** Creates and launches an egg. */
+        function layEgg() {
+            if (gameState !== GAME_STATE.PLAYING) return;
+            const now = performance.now();
+            
+            // Check drop interval to prevent spam
+            if (now - lastEggDropTime < EGG_DROP_INTERVAL) return;
+            lastEggDropTime = now;
+
+            const egg = getEgg();
+            // Give it a starting downward velocity
+            egg.userData.velocity.y = -0.1;
+        }
+
+        /** Updates the position and simple physics for all active eggs. */
+        function updateEggs() {
+            // Filter the scene to find visible objects that have egg-specific velocity data
+            const activeEggs = scene.children.filter(obj => obj.userData.velocity && obj.visible);
+
+            activeEggs.forEach(egg => {
+                // 1. Apply gravity (increase downward velocity)
+                egg.userData.velocity.y += GRAVITY;
+
+                // 2. Update position
+                egg.position.add(egg.userData.velocity);
+
+                // 3. Update Bounding Box for collision detection
+                egg.userData.bbox.setFromObject(egg);
+
+                // 4. Check for collisions (Catch or Miss)
+                checkEggCollision(egg);
+            });
+        }
+
+        /** Checks if an egg has been caught by the basket or hit the ground. */
+        function checkEggCollision(egg) {
+            // Get the current world-space bounding box for the basket
+            const basketBBox = basket.userData.bbox.copy(basket.geometry.boundingBox).applyMatrix4(basket.matrixWorld);
+
+            // --- CATCH COLLISION ---
+            if (basketBBox.intersectsBox(egg.userData.bbox)) {
+                // EGG CAUGHT!
+                score++;
+                updateHUD();
+                recycleEgg(egg);
+                return;
+            }
+
+            // --- MISS COLLISION (Ground) ---
+            // If the bottom of the egg (position.y - radius) is below the ground level (Y=0)
+            if (egg.position.y - EGG_RADIUS <= 0) {
+                // EGG MISSED!
+                lives--;
+                updateHUD();
+                recycleEgg(egg);
+
+                if (lives <= 0) {
+                    gameOver();
+                }
+            }
+        }
+
+        // --- Input Handlers ---
+
+        /** Handles keyboard input for movement, start, and egg drop. */
+        function onKeyDown(event) {
+            // Handle Start/Restart
+            if (gameState === GAME_STATE.START || gameState === GAME_STATE.GAME_OVER) {
+                if (event.key === 's' || event.key === 'S') {
+                    startGame();
+                }
+                return;
+            }
+
+            if (gameState === GAME_STATE.PLAYING) {
+                let newX = basket.position.x;
+
+                // Basket Movement (A/D or Arrow Keys)
+                if (event.key === 'a' || event.key === 'A' || event.key === 'ArrowLeft') {
+                    newX -= BASKET_SPEED;
+                } else if (event.key === 'd' || event.key === 'D' || event.key === 'ArrowRight') {
+                    newX += BASKET_SPEED;
+                }
+
+                // Constrain basket movement within ground bounds
+                const halfGround = GROUND_SIZE / 2;
+                const halfBasket = BASKET_WIDTH / 2;
+                newX = Math.max(-halfGround + halfBasket, Math.min(halfGround - halfBasket, newX));
+
+                // Apply new position and update its bounding box
+                basket.position.x = newX;
+                basket.userData.bbox.setFromObject(basket);
+
+                // Egg Drop (Spacebar)
+                if (event.key === ' ') {
+                    layEgg();
+                    event.preventDefault(); // Prevent spacebar from scrolling the page
+                }
+            }
+        }
+
+        /** Handles mouse click to lay an egg. */
+        function onLayEgg(event) {
+            if (gameState === GAME_STATE.PLAYING) {
+                layEgg();
+            }
+        }
+
+        // --- Animation Loop ---
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (gameState === GAME_STATE.PLAYING) {
+                updateEggs();
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // Start the game when the page fully loads
+        window.onload = function () {
+            init();
+        }
+
+    </script>
+</body>
+</html>
