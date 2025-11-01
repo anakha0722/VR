@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Minimal 3D Billiards (Scored)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #333; }
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            font-family: sans-serif;
+            text-align: center;
+            z-index: 10;
+        }
+        #score {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: sans-serif;
+            font-size: 24px;
+            z-index: 5;
+        }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+    <div id="score">Score: 0</div>
+    <div id="overlay">
+        <h1>3D Minimal Billiards</h1>
+        <p>Press **S** to Start</p>
+        <p>Click on the table to strike the cue ball.</p>
+        <p>Pocket the red ball to win!</p>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // --- GAME CONSTANTS ---
+        const R = 0.25;      // Ball Radius
+        const W = 5.0;       // Table Width
+        const H = 2.5;       // Table Height
+        const IMPULSE = 0.12; // Strike power
+        const FRICTION = 0.99; // Velocity multiplier per frame
+        const POCKET_R = R * 1.5; // Pocket Radius
+
+        // --- SCENE SETUP GLOBALS ---
+        let scene, camera, renderer, raycaster;
+        let cueBall, objectBall;
+        const v1 = new THREE.Vector3(); 
+        const v2 = new THREE.Vector3(); 
+        let cueIndicator;       
+        let gameState = 'START'; // 'START', 'PLAYING', 'GAMEOVER'
+        let score = 0;
+        let animationFrameId;
+
+        const overlayEl = document.getElementById('overlay');
+        const scoreEl = document.getElementById('score');
+
+        init();
+        
+        // --- INITIALIZATION ---
+        function init() {
+            // 1. Scene, Camera, Renderer
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x555555);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+            
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 5, 4); 
+            camera.lookAt(0, 0, 0);
+
+            // 2. Lighting
+            scene.add(new THREE.AmbientLight(0x404040, 3));
+            const light = new THREE.DirectionalLight(0xffffff, 2);
+            light.position.set(5, 10, 5);
+            light.castShadow = true;
+            light.shadow.camera.near = 0.5;
+            light.shadow.camera.far = 50;
+            scene.add(light);
+
+            // 3. Create Table (Felt & Minimal Walls)
+            const feltMat = new THREE.MeshPhongMaterial({ color: 0x006400, side: THREE.DoubleSide });
+            const felt = new THREE.Mesh(new THREE.PlaneGeometry(W, H), feltMat);
+            felt.rotation.x = -Math.PI / 2;
+            felt.receiveShadow = true;
+            felt.name = 'felt';
+            scene.add(felt);
+
+            const wallMat = new THREE.MeshPhongMaterial({ color: 0x8B4513 });
+            const wallH = 0.5;
+            const wallT = 0.1;
+
+            const walls = [
+                { w: wallT, h: wallH, d: H, x: -W/2 - wallT/2, z: 0 },
+                { w: wallT, h: wallH, d: H, x: W/2 + wallT/2, z: 0 },
+                { w: W + wallT, h: wallH, d: wallT, x: 0, z: -H/2 - wallT/2 },
+                { w: W + wallT, h: wallH, d: wallT, x: 0, z: H/2 + wallT/2 }
+            ];
+            walls.forEach(p => {
+                const mesh = new THREE.Mesh(new THREE.BoxGeometry(p.w, p.h, p.d), wallMat);
+                mesh.position.set(p.x, wallH / 2, p.z);
+                mesh.castShadow = true;
+                scene.add(mesh);
+            });
+
+            // Pockets
+            const pocketGeo = new THREE.SphereGeometry(POCKET_R, 16, 16);
+            const pocketMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+            const pockets = [
+                { x: -W/2, z: -H/2 }, { x: W/2, z: -H/2 }, 
+                { x: -W/2, z: H/2 }, { x: W/2, z: H/2 }
+            ];
+            pockets.forEach(p => {
+                const mesh = new THREE.Mesh(pocketGeo, pocketMat);
+                mesh.position.set(p.x, 0.01, p.z);
+                scene.add(mesh);
+            });
+
+            // 4. Create Balls
+            const ballGeo = new THREE.SphereGeometry(R, 32, 32);
+            cueBall = new THREE.Mesh(ballGeo, new THREE.MeshPhongMaterial({ color: 0xffffff }));
+            objectBall = new THREE.Mesh(ballGeo, new THREE.MeshPhongMaterial({ color: 0xff0000 }));
+
+            cueBall.position.set(-W / 4, R, 0);
+            objectBall.position.set(W / 4, R, 0);
+
+            [cueBall, objectBall].forEach(b => {
+                b.castShadow = true;
+                b.receiveShadow = true;
+                scene.add(b);
+            });
+
+            // 5. Cue Indicator
+            const points = [new THREE.Vector3(0, 0, 0), new THREE.Vector3(1, 0, 0)];
+            cueIndicator = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: 0xffff00 }));
+            cueIndicator.position.y = R + 0.01;
+            cueIndicator.visible = false;
+            scene.add(cueIndicator);
+
+            // 6. Interaction Setup
+            raycaster = new THREE.Raycaster();
+            window.addEventListener('click', onTableClick);
+            window.addEventListener('mousemove', onMouseMove);
+            window.addEventListener('keydown', onKeyPress);
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+
+            // Start rendering the scene immediately to show the table under the overlay
+            render(); 
+        }
+
+        // --- GAME CONTROL ---
+        function onKeyPress(event) {
+            if (event.key.toUpperCase() === 'S' && gameState === 'START') {
+                startGame();
+            }
+        }
+
+        function startGame() {
+            gameState = 'PLAYING';
+            overlayEl.classList.add('hidden');
+            animate(); // Start the physics/animation loop
+        }
+
+        function gameOver() {
+            gameState = 'GAMEOVER';
+            cancelAnimationFrame(animationFrameId);
+            overlayEl.innerHTML = `<h1>GAME OVER!</h1><p>You Pocketed the Red Ball!</p><p>Final Score: ${score}</p><p>Refresh to play again.</p>`;
+            overlayEl.classList.remove('hidden');
+        }
+
+        // --- CUE INTERACTION ---
+        function onMouseMove(event) {
+            if (gameState !== 'PLAYING') return;
+
+            // Only show cue if balls are stopped
+            if (v1.lengthSq() < 0.0001 && v2.lengthSq() < 0.0001 && objectBall.visible) {
+                updateCueIndicator(event);
+            } else {
+                cueIndicator.visible = false;
+            }
+        }
+
+        function updateCueIndicator(event) {
+            const mouse = new THREE.Vector2(
+                (event.clientX / window.innerWidth) * 2 - 1,
+                -(event.clientY / window.innerHeight) * 2 + 1
+            );
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(scene.children.filter(c => c.name === 'felt'));
+
+            if (intersects.length > 0) {
+                const hitPoint = intersects[0].point;
+                const dir = new THREE.Vector3().subVectors(hitPoint, cueBall.position).setY(0);
+                const length = Math.min(dir.length(), 2);
+                dir.normalize().multiplyScalar(length);
+
+                cueIndicator.position.copy(cueBall.position).setY(R + 0.01);
+                cueIndicator.geometry.attributes.position.array[3] = dir.x;
+                cueIndicator.geometry.attributes.position.array[5] = dir.z;
+                cueIndicator.geometry.attributes.position.needsUpdate = true;
+                cueIndicator.visible = true;
+            } else {
+                cueIndicator.visible = false;
+            }
+        }
+
+        function onTableClick(event) {
+            if (gameState !== 'PLAYING' || v1.lengthSq() > 0.0001 || v2.lengthSq() > 0.0001) return;
+
+            const mouse = new THREE.Vector2(
+                (event.clientX / window.innerWidth) * 2 - 1,
+                -(event.clientY / window.innerHeight) * 2 + 1
+            );
+
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(scene.children.filter(c => c.name === 'felt'));
+
+            if (intersects.length > 0) {
+                const hitPoint = intersects[0].point;
+                const dir = new THREE.Vector3().subVectors(hitPoint, cueBall.position).setY(0).normalize();
+
+                v1.copy(dir).multiplyScalar(IMPULSE);
+                cueIndicator.visible = false; 
+                score++; // Increment score on every strike
+                scoreEl.textContent = `Score: ${score}`;
+            }
+        }
+
+        // --- GAME LOOP ---
+        function animate() {
+            if (gameState !== 'PLAYING') return;
+            animationFrameId = requestAnimationFrame(animate);
+            updatePhysics();
+            render();
+        }
+
+        function render() {
+            renderer.render(scene, camera);
+        }
+
+        // --- CORE PHYSICS LOGIC ---
+        function updatePhysics() {
+            // Check if the object ball is being pocketed or is already gone
+            if (!objectBall.visible) {
+                 if (objectBall.userData.isFalling) {
+                    objectBall.position.y -= 0.05;
+                    if (objectBall.position.y < -1) {
+                        scene.remove(objectBall);
+                        gameOver();
+                    }
+                 }
+                return;
+            }
+
+            // A. Move Balls, Apply Friction, Handle Wall Collision
+            const balls = [{ mesh: cueBall, v: v1 }, { mesh: objectBall, v: v2 }];
+            const halfW = W / 2 - R;
+            const halfH = H / 2 - R;
+
+            balls.forEach(ball => {
+                if (ball.v.lengthSq() > 0.0001) {
+                    ball.mesh.position.add(ball.v);
+                    ball.v.multiplyScalar(FRICTION);
+
+                    // Wall Collision
+                    if (Math.abs(ball.mesh.position.x) > halfW) {
+                        ball.v.x *= -1;
+                        ball.mesh.position.x = Math.sign(ball.mesh.position.x) * halfW;
+                    }
+                    if (Math.abs(ball.mesh.position.z) > halfH) {
+                        ball.v.z *= -1;
+                        ball.mesh.position.z = Math.sign(ball.mesh.position.z) * halfH;
+                    }
+                } else {
+                    ball.v.set(0, 0, 0);
+                }
+            });
+
+            // B. Ball-to-Ball Collision
+            const distVec = new THREE.Vector3().subVectors(objectBall.position, cueBall.position);
+            const dist = distVec.length();
+            const minD = R * 2;
+
+            if (dist < minD && dist > 0.001) {
+                const normal = distVec.clone().normalize();
+                
+                // Separation
+                const correction = normal.clone().multiplyScalar(minD - dist);
+                cueBall.position.sub(correction.clone().multiplyScalar(0.5));
+                objectBall.position.add(correction.clone().multiplyScalar(0.5));
+
+                // Elastic Collision Physics (equal mass)
+                const v1n = v1.dot(normal);
+                const v2n = v2.dot(normal);
+                const v1t = v1.clone().sub(normal.clone().multiplyScalar(v1n));
+                const v2t = v2.clone().sub(normal.clone().multiplyScalar(v2n));
+                const v1n_new = v2n;
+                const v2n_new = v1n;
+
+                v1.copy(v1t).add(normal.clone().multiplyScalar(v1n_new));
+                v2.copy(v2t).add(normal.clone().multiplyScalar(v2n_new));
+            }
+
+            // C. Pocket Check (Object Ball)
+            const pockets = [
+                { x: -W/2, z: -H/2 }, { x: W/2, z: -H/2 }, 
+                { x: -W/2, z: H/2 }, { x: W/2, z: H/2 }
+            ];
+
+            pockets.forEach(p => {
+                const pocketPos = new THREE.Vector3(p.x, 0, p.z);
+                if (objectBall.position.distanceTo(pocketPos) < POCKET_R) {
+                    v2.set(0, 0, 0); 
+                    objectBall.userData.isFalling = true; // Trigger falling animation
+                    objectBall.visible = false; // Hide from physics logic
+                }
+            });
+        }
+    </script>
+</body>
+</html>
