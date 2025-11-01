@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Football Kick</title>
+    <!-- Load Three.js from CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Load Tailwind CSS for simple UI styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Tone.js for audio synthesis (sound effects) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.min.js"></script>
+    <style>
+        /* Set body and canvas to take up the full viewport */
+        body { margin: 0; overflow: hidden; font-family: 'Inter', sans-serif; }
+        canvas { display: block; }
+
+        /* Style for the UI and overlays */
+        #ui-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            pointer-events: none; /* Allows clicks to pass through to the canvas */
+            z-index: 10;
+        }
+
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            color: white;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            font-size: 2rem;
+            line-height: 1.5;
+            z-index: 20;
+            transition: opacity 0.5s;
+        }
+
+        #controls-hint {
+            position: absolute;
+            bottom: 20px;
+            width: 100%;
+            text-align: center;
+            color: #ccc;
+            font-size: 0.9rem;
+        }
+    </style>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'field-green': '#4CAF50',
+                        'ui-primary': '#1D4ED8',
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <!-- UI Overlay for Score and Lives -->
+    <div id="ui-container">
+        <div class="flex justify-between items-center w-full max-w-4xl mx-auto p-4 bg-white/10 backdrop-blur-sm rounded-b-lg shadow-lg">
+            <div class="text-white text-xl font-bold">Score: <span id="score-display">0</span></div>
+            <div class="text-white text-xl font-bold">Lives: <span id="lives-display">3</span></div>
+        </div>
+    </div>
+
+    <!-- Start/Game Over Overlay -->
+    <div id="overlay">
+        <h1 id="overlay-title" class="text-5xl font-extrabold mb-4">3D Football Kick</h1>
+        <p id="overlay-message" class="text-3xl font-semibold mb-8">Press S to Start</p>
+        <p class="text-lg">Controls: Drag mouse on the field to aim, release to kick!</p>
+    </div>
+
+    <!-- Controls Hint -->
+    <div id="controls-hint">
+        Drag on the green field to launch the ball. Score in the goal!
+    </div>
+
+    <script type="module">
+        // --- Game State Variables ---
+        let scene, camera, renderer;
+        let ball, field, goal, aimingLine, ballIndicator; // Added aimingLine and ballIndicator
+        let raycaster, mouse = new THREE.Vector2();
+        let score = 0;
+        let lives = 3;
+        let isGameActive = false;
+        let isGameOver = false;
+
+        // Physics State
+        const GRAVITY = 0.005;
+        const KICK_FACTOR = 0.15; // Increased force significantly for easier drag and throw responsiveness
+        const DRAG_FRICTION = 0.99; // Horizontal friction (air resistance)
+        const GROUND_FRICTION = 0.96; // Friction when ball is touching ground
+        const VELOCITY_THRESHOLD = 0.01; // Velocity below which the ball is considered stopped
+        const BALL_RADIUS = 0.7; // Increased ball size for visibility
+        const ballState = {
+            velocity: new THREE.Vector3(0, 0, 0),
+            isMoving: false,
+            isAirborne: false,
+        };
+
+        // Drag-and-Throw Variables
+        let isDragging = false;
+        let dragStartPoint = null;
+
+        // Tone.js Sound Setup (using allowed Tone.js library)
+        let cheerSynth, crowdAmbience;
+
+        /**
+         * Converts a Tone.js time unit to seconds.
+         * @param {string} time - Tone.js time value (e.g., "8n", "0.5").
+         * @returns {number} The time in seconds.
+         */
+        function playGoalCheer() {
+            if (cheerSynth) {
+                // Play a bright, short chord (simulating a triumphant sound/cheer)
+                const now = Tone.now();
+                cheerSynth.triggerAttackRelease(["C4", "E4", "G4", "C5"], "0.5", now, 0.8);
+                cheerSynth.triggerAttackRelease(["C4", "E4", "G4", "C5"], "0.5", now + 0.3, 0.5);
+            }
+        }
+
+        function setupAudio() {
+            // Ambient Crowd Simulation: Low-volume, slightly noisy tone
+            crowdAmbience = new Tone.Noise("brown").toDestination();
+            crowdAmbience.volume.value = -30; // Very quiet
+            crowdAmbience.filter = new Tone.Filter(200, "bandpass").toDestination(); // Make it sound muffled
+            crowdAmbience.filter.Q.value = 0.1;
+            crowdAmbience.start();
+
+            // Goal Cheer Synth: Polyphonic synth for a bright, triumphant chord
+            cheerSynth = new Tone.PolySynth(Tone.AMSynth, {
+                oscillator: { type: "square" },
+                envelope: {
+                    attack: 0.01,
+                    decay: 0.2,
+                    sustain: 0.1,
+                    release: 0.5
+                },
+                volume: -10
+            }).toDestination();
+        }
+
+        // --- Core Scene Initialization ---
+        function init() {
+            // 1. Scene setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87ceeb); // Sky blue background
+
+            // 2. Camera setup (Perspective: positioned further back to see the ball at Z=20)
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 8, 25); // Camera is 25 units back
+            camera.lookAt(0, 0, 0);
+
+            // 3. Renderer setup
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true; // Enable shadow maps
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.body.appendChild(renderer.domElement);
+
+            // 4. Lighting
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6); // Increased ambient light for better overall visibility
+            scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
+            directionalLight.position.set(-10, 20, 10);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 2048;
+            directionalLight.shadow.mapSize.height = 2048;
+            directionalLight.shadow.camera.near = 0.5;
+            directionalLight.shadow.camera.far = 50;
+            directionalLight.shadow.camera.left = -20;
+            directionalLight.shadow.camera.right = 20;
+            directionalLight.shadow.camera.top = 20;
+            directionalLight.shadow.camera.bottom = -20;
+            scene.add(directionalLight);
+
+            // 5. Create Game Objects
+            createField();
+            createBall();
+            createGoal();
+            
+            // Setup aiming line visual aid (always exists, just visible/invisible)
+            const lineMaterial = new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 5 });
+            const lineGeometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 0)]);
+            aimingLine = new THREE.Line(lineGeometry, lineMaterial);
+            aimingLine.position.y = 0.05; // Slightly above ground
+            scene.add(aimingLine);
+            aimingLine.visible = false;
+
+
+            // 6. Raycaster for mouse interaction
+            raycaster = new THREE.Raycaster();
+
+            // 7. Event Listeners
+            window.addEventListener('resize', onWindowResize, false);
+            document.addEventListener('mousedown', onMouseDown, false);
+            document.addEventListener('mouseup', onMouseUp, false);
+            document.addEventListener('mousemove', onMouseMove, false); // Added mouse move listener
+            document.addEventListener('keydown', onKeyDown, false);
+
+            // 8. Start screen is visible initially
+            document.getElementById('overlay').style.display = 'flex';
+        }
+
+        // --- Game Object Creation ---
+
+        function createField() {
+            // Football Field (Plane)
+            const fieldGeometry = new THREE.PlaneGeometry(40, 60);
+            const fieldMaterial = new THREE.MeshPhongMaterial({ color: 0x4CAF50, side: THREE.DoubleSide });
+            field = new THREE.Mesh(fieldGeometry, fieldMaterial);
+            field.rotation.x = -Math.PI / 2; // Rotate to lie flat on the ground
+            field.receiveShadow = true; // Field can receive shadows
+            field.name = "field";
+            scene.add(field);
+
+            // White lines on the field (simple geometry approach)
+            const lineMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+            const lineThickness = 0.1;
+
+            // Center line (across the width)
+            const centerLine = new THREE.Mesh(new THREE.BoxGeometry(40, lineThickness, lineThickness), lineMaterial);
+            centerLine.position.y = 0.01;
+            centerLine.rotation.x = Math.PI / 2;
+            scene.add(centerLine);
+
+            // Boundary lines (lengthwise)
+            const boundaryLineLeft = new THREE.Mesh(new THREE.BoxGeometry(lineThickness, lineThickness, 60), lineMaterial);
+            boundaryLineLeft.position.set(-20, 0.01, 0);
+            scene.add(boundaryLineLeft);
+
+            const boundaryLineRight = new THREE.Mesh(new THREE.BoxGeometry(lineThickness, lineThickness, 60), lineMaterial);
+            boundaryLineRight.position.set(20, 0.01, 0);
+            scene.add(boundaryLineRight);
+        }
+
+        function createBall() {
+            const ballGeometry = new THREE.SphereGeometry(BALL_RADIUS, 32, 32); // Used new BALL_RADIUS
+            // Enhanced: Brighter, more distinct texture using a blue and white pattern
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;
+            canvas.height = 64;
+            const context = canvas.getContext('2d');
+            
+            // Draw a checkerboard or panel-like pattern for better visibility
+            context.fillStyle = '#ffffff'; // White
+            context.fillRect(0, 0, 64, 64);
+            context.fillStyle = '#1e90ff'; // Dodger Blue
+            context.beginPath();
+            context.arc(32, 32, 28, 0, Math.PI * 2); // Larger circle
+            context.fill();
+            context.fillStyle = '#ffffff';
+            context.beginPath();
+            context.arc(32, 32, 14, 0, Math.PI * 2); // Smaller inner circle
+            context.fill();
+            const ballTexture = new THREE.CanvasTexture(canvas);
+
+            const ballMaterial = new THREE.MeshPhongMaterial({ map: ballTexture, shininess: 50 });
+            ball = new THREE.Mesh(ballGeometry, ballMaterial);
+            ball.castShadow = true;
+            ball.name = "ball";
+            scene.add(ball);
+
+            // Create a ring indicator that only shows when the ball is stationary (for visibility)
+            const ringGeometry = new THREE.RingGeometry(BALL_RADIUS * 1.2, BALL_RADIUS * 1.3, 32);
+            // Enhanced: Brighter orange and slightly more opaque
+            const ringMaterial = new THREE.MeshBasicMaterial({ color: 0xff8c00, side: THREE.DoubleSide, transparent: true, opacity: 0.9 }); 
+            ringGeometry.rotateX(-Math.PI / 2); // Lay flat
+            ballIndicator = new THREE.Mesh(ringGeometry, ringMaterial);
+            ballIndicator.position.y = 0.02; // Slightly higher to avoid clipping
+            scene.add(ballIndicator);
+        }
+
+        function createGoal() {
+            const goalWidth = 10;
+            const goalHeight = 4;
+            const goalDepth = 1;
+            const postRadius = 0.15;
+
+            const postMaterial = new THREE.MeshPhongMaterial({ color: 0xffffff });
+
+            // Crossbar
+            const crossbar = new THREE.Mesh(new THREE.BoxGeometry(goalWidth, postRadius * 2, postRadius * 2), postMaterial);
+            crossbar.position.set(0, goalHeight, -30);
+            crossbar.castShadow = true;
+
+            // Left Post
+            const leftPost = new THREE.Mesh(new THREE.CylinderGeometry(postRadius, postRadius, goalHeight, 12), postMaterial);
+            leftPost.position.set(-goalWidth / 2 + postRadius, goalHeight / 2, -30);
+            leftPost.castShadow = true;
+
+            // Right Post
+            const rightPost = new THREE.Mesh(new THREE.CylinderGeometry(postRadius, postRadius, goalHeight, 12), postMaterial);
+            rightPost.position.set(goalWidth / 2 - postRadius, goalHeight / 2, -30);
+            rightPost.castShadow = true;
+
+            goal = new THREE.Group();
+            goal.add(crossbar, leftPost, rightPost);
+            goal.name = "goal";
+
+            // Add an invisible detection area for scoring
+            const goalTargetGeometry = new THREE.BoxGeometry(goalWidth, goalHeight, goalDepth);
+            const goalTargetMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.0 });
+            const goalTarget = new THREE.Mesh(goalTargetGeometry, goalTargetMaterial);
+            goalTarget.position.set(0, goalHeight / 2, -30);
+            goalTarget.name = "goal-target";
+            goal.add(goalTarget);
+
+            scene.add(goal);
+
+            // Initial placement of the ball
+            resetBall();
+        }
+
+        // --- Game Logic and State Management ---
+
+        function updateUI() {
+            document.getElementById('score-display').textContent = score;
+            document.getElementById('lives-display').textContent = lives;
+        }
+
+        function resetBall() {
+            // Reset ball position: MOVED from Z=20 to Z=15 (10 units closer to the camera/user)
+            ball.position.set(0, BALL_RADIUS, 15);
+            ballState.velocity.set(0, 0, 0);
+            ballState.isMoving = false;
+            if (ballIndicator) {
+                ballIndicator.position.x = ball.position.x;
+                ballIndicator.position.z = ball.position.z;
+                ballIndicator.visible = true;
+            }
+        }
+
+        function handleGoal() {
+            score++;
+            updateUI();
+            playGoalCheer();
+            console.log("GOAL! Score:", score);
+            resetBall();
+        }
+
+        function handleMiss() {
+            lives--;
+            updateUI();
+            console.log("MISS! Lives left:", lives);
+            if (lives <= 0) {
+                endGame(false);
+            } else {
+                resetBall();
+            }
+        }
+
+        function startGame() {
+            score = 0;
+            lives = 3;
+            isGameActive = true;
+            isGameOver = false;
+            updateUI();
+            resetBall();
+            document.getElementById('overlay').style.opacity = 0;
+            document.getElementById('overlay').style.pointerEvents = 'none';
+
+            // Ensure audio context is started on user interaction
+            if (Tone.context.state !== 'running') {
+                Tone.start();
+            }
+        }
+
+        function endGame() {
+            isGameActive = false;
+            isGameOver = true;
+            const overlay = document.getElementById('overlay');
+            document.getElementById('overlay-title').textContent = "Game Over";
+            document.getElementById('overlay-message').textContent = `Final Score: ${score}. Press S to Restart.`;
+            overlay.style.opacity = 1;
+            overlay.style.pointerEvents = 'auto';
+            Tone.Transport.stop(); // Stop any looping music/ambience
+        }
+
+
+        // --- Physics Engine (Simple Custom Implementation) ---
+
+        function updatePhysics() {
+            if (!ballState.isMoving) return;
+            
+            // Hide indicator when moving
+            if (ballIndicator) ballIndicator.visible = false;
+
+            // 1. Apply Gravity
+            if (ball.position.y > BALL_RADIUS) { // Check against new BALL_RADIUS
+                ballState.isAirborne = true;
+                ballState.velocity.y -= GRAVITY;
+            } else {
+                ballState.isAirborne = false;
+                // Collision with ground: set height to ground and damp vertical velocity
+                ball.position.y = BALL_RADIUS;
+                if (ballState.velocity.y < 0) {
+                    ballState.velocity.y *= -0.3; // Simple bounce
+                }
+            }
+
+            // 2. Apply Friction (Horizontal decay)
+            const frictionFactor = ballState.isAirborne ? DRAG_FRICTION : GROUND_FRICTION;
+            ballState.velocity.x *= frictionFactor;
+            ballState.velocity.z *= frictionFactor;
+
+            // 3. Update Position
+            ball.position.add(ballState.velocity);
+
+            // 4. Check for Stop Condition (Ball missed or scored)
+            const totalVelocity = ballState.velocity.length();
+            if (totalVelocity < VELOCITY_THRESHOLD) {
+                ballState.velocity.set(0, 0, 0);
+                ballState.isMoving = false;
+                if (isGameActive) {
+                    // If the ball stops and hasn't scored, it's a miss
+                    handleMiss();
+                }
+            }
+
+            // 5. Check for Goal (Collision with the invisible goal target)
+            const goalTarget = goal.getObjectByName("goal-target");
+            const ballRadius = BALL_RADIUS;
+
+            // Simple Axis-Aligned Bounding Box (AABB) intersection check
+            if (
+                ball.position.z - ballRadius < goalTarget.position.z &&
+                ball.position.z + ballRadius > goalTarget.position.z - 0.5 &&
+                ball.position.y + ballRadius > 0 && // Above ground
+                ball.position.y - ballRadius < goalTarget.position.y + 2 && // Within goal height
+                ball.position.x + ballRadius > goalTarget.position.x - 5 &&
+                ball.position.x - ballRadius < goalTarget.position.x + 5
+            ) {
+                if (isGameActive && ballState.isMoving) {
+                    handleGoal();
+                }
+            }
+
+            // 6. Check Boundary (Side lines)
+            const fieldHalfWidth = 20;
+            if (Math.abs(ball.position.x) > fieldHalfWidth - BALL_RADIUS) {
+                // Simple horizontal bounce
+                ballState.velocity.x *= -0.7;
+                ball.position.x = ball.position.x > 0 ? fieldHalfWidth - BALL_RADIUS : -(fieldHalfWidth - BALL_RADIUS);
+            }
+        }
+
+        // --- Input Handlers (Drag and Throw) ---
+
+        function getIntersection(event) {
+            // Calculate mouse position in normalized device coordinates (-1 to +1)
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = - (event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+
+            // Check intersection only with the field
+            const intersects = raycaster.intersectObject(field);
+
+            if (intersects.length > 0) {
+                return intersects[0].point;
+            }
+            return null;
+        }
+
+        function onMouseDown(event) {
+            if (!isGameActive || ballState.isMoving) return;
+
+            const intersection = getIntersection(event);
+            if (intersection) {
+                isDragging = true;
+                dragStartPoint = intersection;
+                // Position the line start at the ball's base
+                aimingLine.visible = true;
+                const points = [ball.position.clone(), ball.position.clone().add(new THREE.Vector3(0, 0.01, 0))];
+                aimingLine.geometry.setFromPoints(points);
+                aimingLine.geometry.attributes.position.needsUpdate = true;
+            }
+        }
+        
+        function onMouseMove(event) {
+            if (!isGameActive || !isDragging || ballState.isMoving) return;
+
+            const dragCurrentPoint = getIntersection(event);
+            if (dragStartPoint && dragCurrentPoint) {
+                // Calculate the kick vector (Start - Current)
+                const kickVector = new THREE.Vector3().subVectors(dragStartPoint, dragCurrentPoint);
+                kickVector.y = 0; // Keep line flat on the ground
+
+                // Determine maximum length for the visual line (prevents extremely long lines)
+                const maxLineLength = 5; 
+                const lineEnd = ball.position.clone().add(kickVector.clone().clampLength(0, maxLineLength));
+
+                const points = [ball.position, lineEnd];
+
+                aimingLine.geometry.setFromPoints(points);
+                aimingLine.geometry.attributes.position.needsUpdate = true;
+            }
+        }
+
+        function onMouseUp(event) {
+            if (!isGameActive || !isDragging || ballState.isMoving) return;
+
+            isDragging = false;
+            
+            // Hide aiming line immediately
+            if (aimingLine) aimingLine.visible = false;
+
+            const dragEndPoint = getIntersection(event);
+
+            if (dragStartPoint && dragEndPoint) {
+                // Calculate the kick vector (End - Start)
+                const kickVector = new THREE.Vector3().subVectors(dragStartPoint, dragEndPoint);
+
+                // Calculate horizontal distance dragged
+                const distance = kickVector.length();
+
+                // Normalize the vector (direction) and apply force magnitude
+                kickVector.normalize();
+
+                // Apply force only in X and Z plane, slightly lift the ball (Y) for a satisfying kick
+                ballState.velocity.x = kickVector.x * distance * KICK_FACTOR;
+                ballState.velocity.y = Math.min(distance * KICK_FACTOR * 0.5, 0.2); // Small vertical lift
+                ballState.velocity.z = kickVector.z * distance * KICK_FACTOR;
+
+                ballState.isMoving = true;
+                dragStartPoint = null; // Clear start point
+            }
+        }
+
+        function onKeyDown(event) {
+            if (event.key === 's' || event.key === 'S') {
+                if (!isGameActive || isGameOver) {
+                    startGame();
+                }
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- Animation Loop ---
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (isGameActive && !isGameOver) {
+                updatePhysics();
+            }
+
+            // Ball indicator pulsing and positioning
+            if (!ballState.isMoving && ballIndicator) {
+                // Pulsing animation
+                const scale = 1.0 + Math.sin(Date.now() * 0.005) * 0.15; // Slightly more exaggerated pulse
+                ballIndicator.scale.set(scale, scale, scale);
+                // Keep indicator centered under the ball
+                ballIndicator.position.x = ball.position.x;
+                ballIndicator.position.z = ball.position.z;
+            } 
+            
+            // Ball spin while moving
+            if (ballState.isMoving) {
+                // Rotate the ball based on its velocity to simulate rolling
+                ball.rotation.x += ballState.velocity.z * 0.1;
+                ball.rotation.z += ballState.velocity.x * 0.1;
+            }
+
+
+            renderer.render(scene, camera);
+        }
+
+        // Initialize everything when the window loads
+        window.onload = function () {
+            init();
+            setupAudio(); // Initialize audio synths
+            animate(); // Start the render loop
+        }
+    </script>
+</body>
+</html>
