@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minimal 3D Shooter</title>
+    <!-- Load Three.js from CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: sans-serif; background-color: #000; cursor: crosshair; }
+        canvas { display: block; }
+        
+        /* Minimal HUD styling */
+        .hud {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: white;
+            font-size: 24px;
+            padding: 10px 20px;
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 5px;
+            z-index: 10;
+            display: flex;
+            gap: 40px;
+        }
+
+        /* Start/Game Over Screen Styling */
+        #start-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            font-size: 30px;
+            z-index: 20;
+        }
+        #start-screen h1 { font-size: 60px; margin-bottom: 20px; }
+        #start-screen p { margin-top: 10px; font-size: 24px; }
+
+        /* Minimal Crosshair Styling (Central plus sign) */
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 28px;
+            line-height: 1;
+            pointer-events: none; /* Allows clicks to pass through to the window */
+            z-index: 15;
+            text-shadow: 0 0 5px black;
+        }
+    </style>
+</head>
+<body>
+    <div class="hud">
+        <span id="score-display">Score: 0</span>
+        <span id="lives-display">Lives: 3</span>
+    </div>
+
+    <div id="crosshair">+</div> <!-- Minimal Crosshair -->
+
+    <!-- Start/Game Over Screen -->
+    <div id="start-screen">
+        <h1>3D Shooter</h1>
+        <p>Use Mouse to Aim. Click to Shoot.</p>
+        <p>Press 'S' to Start Game</p>
+        <p id="game-message" style="color: red;"></p>
+    </div>
+
+    <script>
+        // --- Global Variables ---
+        let scene, camera, renderer;
+        let gun, target;
+        const bullets = [];
+        let score = 0;
+        let lives = 3;
+        let gameState = 'start'; // 'start', 'playing', 'gameover'
+        const bulletSpeed = 1.5;
+        const targetSpeed = 0.05; // Target slowly moves towards the player
+        const maxBulletDistance = 100;
+        const targetDangerZ = 10; // If target Z position > 10, player loses a life
+        let mouseX = 0; // NEW: Variable to store normalized mouse position
+        
+        // DOM elements
+        const scoreDisplay = document.getElementById('score-display');
+        const livesDisplay = document.getElementById('lives-display');
+        const startScreen = document.getElementById('start-screen');
+        const gameMessage = document.getElementById('game-message');
+
+        // --- Game Setup Functions ---
+
+        function init() {
+            // 1. Scene Setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x333333); // Dark background
+
+            // 2. Camera Setup (Fixed Position)
+            const aspect = window.innerWidth / window.innerHeight;
+            camera = new THREE.PerspectiveCamera(75, aspect, 0.1, 1000);
+            camera.position.set(0, 2, 25);
+            camera.lookAt(0, 2, 0); 
+
+            // 3. Renderer Setup
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            // 4. Lighting
+            const ambientLight = new THREE.AmbientLight(0x404040, 5); 
+            scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 5);
+            directionalLight.position.set(5, 10, 5); 
+            scene.add(directionalLight);
+
+            // 5. Create Game Objects
+            createGround();
+            createGun();
+            createTarget();
+            
+            // 6. Event Listeners
+            window.addEventListener('resize', onWindowResize);
+            window.addEventListener('click', handleInput);
+            window.addEventListener('keydown', handleInput);
+            window.addEventListener('mousemove', onMouseMove); // NEW: Listen for mouse movement
+            
+            // Initial state display
+            updateHUD();
+            startScreen.style.display = 'flex';
+        }
+
+        // NEW: Handles continuous aiming based on mouse position
+        function onMouseMove(event) {
+            // Normalize mouse X position from -1 (left) to 1 (right)
+            mouseX = (event.clientX / window.innerWidth) * 2 - 1;
+            
+            // Clamp value to prevent extreme rotation (optional but recommended)
+            mouseX = Math.max(-1, Math.min(1, mouseX));
+        }
+
+        function handleInput(event) {
+            if (gameState === 'playing' && event.type === 'click') {
+                shootBullet();
+            } else if ((gameState === 'start' || gameState === 'gameover') && event.type === 'keydown' && event.key.toUpperCase() === 'S') {
+                startGame();
+            }
+        }
+
+        function startGame() {
+            score = 0;
+            lives = 3;
+            gameState = 'playing';
+            startScreen.style.display = 'none';
+            gameMessage.innerText = '';
+            resetTargetPosition();
+            updateHUD();
+        }
+
+        function updateHUD() {
+            scoreDisplay.innerText = `Score: ${score}`;
+            livesDisplay.innerText = `Lives: ${lives}`;
+        }
+
+        function createGround() {
+            // Simple gray ground plane
+            const geometry = new THREE.PlaneGeometry(300, 300);
+            const material = new THREE.MeshLambertMaterial({ color: 0x555555 });
+            const ground = new THREE.Mesh(geometry, material);
+            ground.rotation.x = -Math.PI / 2; 
+            ground.position.y = 0;
+            scene.add(ground);
+        }
+
+        function createGun() {
+            // Simple white cube for the gun
+            const geometry = new THREE.BoxGeometry(0.5, 0.5, 3);
+            const material = new THREE.MeshStandardMaterial({ color: 0xcccccc });
+            gun = new THREE.Mesh(geometry, material);
+            gun.position.set(0, 1.5, 22);
+            gun.rotation.y = Math.PI; // Initially pointed straight down -Z
+            scene.add(gun);
+        }
+
+        function createTarget() {
+            // Simple cyan cylinder target
+            const geometry = new THREE.CylinderGeometry(2, 2, 10, 16); 
+            const material = new THREE.MeshStandardMaterial({ color: 0x00ffff, metalness: 0.8 });
+            target = new THREE.Mesh(geometry, material);
+            target.bbox = new THREE.Box3().setFromObject(target);
+            resetTargetPosition();
+            scene.add(target);
+        }
+
+        function resetTargetPosition() {
+            // Place the target far away at a random X
+            const x = (Math.random() - 0.5) * 40; 
+            const z = -(Math.random() * 50 + 30); // Z between -80 and -30
+            target.position.set(x, 5, z);
+            target.bbox.setFromObject(target);
+        }
+
+        // --- Game Logic Functions ---
+
+        function shootBullet() {
+            if (gameState !== 'playing') return;
+
+            // Create a small yellow sphere for the bullet
+            const geometry = new THREE.SphereGeometry(0.3, 8, 8);
+            const material = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+            const bullet = new THREE.Mesh(geometry, material);
+
+            // Set bullet's starting position
+            bullet.position.copy(gun.position);
+            bullet.position.z -= 1.5; 
+
+            // NEW: Calculate the velocity based on the current gun rotation
+            
+            // Gun's full rotation angle, adjusted so that angle=0 is straight ahead (-Z axis)
+            const angle = gun.rotation.y - Math.PI; 
+            
+            // Calculate X and Z components using trigonometry
+            // In Three.js, horizontal rotation (around Y axis) means:
+            // X-velocity = -sin(angle) * speed
+            // Z-velocity = -cos(angle) * speed
+            const vx = Math.sin(angle) * bulletSpeed;
+            const vz = Math.cos(angle) * -bulletSpeed;
+
+            bullet.velocity = new THREE.Vector3(vx, 0, vz);
+            
+            bullet.distanceTraveled = 0; 
+            bullet.bbox = new THREE.Box3().setFromObject(bullet); 
+
+            scene.add(bullet);
+            bullets.push(bullet);
+        }
+
+        function checkCollision(bullet, target) {
+            bullet.bbox.setFromObject(bullet);
+            return bullet.bbox.intersectsBox(target.bbox);
+        }
+
+        function updateBullets() {
+            const hitBullets = [];
+            const activeBullets = [];
+
+            for (let i = 0; i < bullets.length; i++) {
+                const bullet = bullets[i];
+
+                // 1. Move the bullet
+                bullet.position.add(bullet.velocity);
+                // Calculate distance traveled based on the magnitude of the velocity vector
+                bullet.distanceTraveled += bullet.velocity.length(); 
+
+                // 2. Check for collision
+                if (checkCollision(bullet, target)) {
+                    // Target Hit!
+                    score++;
+                    updateHUD();
+                    hitBullets.push(bullet);
+                    resetTargetPosition();
+                } 
+                // 3. Check for decay (bullet traveled too far)
+                else if (bullet.distanceTraveled > maxBulletDistance) {
+                    hitBullets.push(bullet);
+                } else {
+                    activeBullets.push(bullet);
+                }
+            }
+
+            // Remove hit/decayed bullets from the scene
+            for (const bullet of hitBullets) {
+                scene.remove(bullet);
+            }
+
+            // Update the global bullets array
+            bullets.length = 0;
+            bullets.push(...activeBullets);
+        }
+
+        function updateGame() {
+            if (gameState !== 'playing') return;
+
+            // NEW: Aiming Logic (Rotate gun based on mouse position)
+            // Maps mouseX (-1 to 1) to a rotation angle (e.g., -0.8 radians to 0.8 radians)
+            const rotationRange = 0.8; // Max horizontal swing angle
+            // Gun starts facing Math.PI (negative Z), we add the mouse offset
+            gun.rotation.y = Math.PI + (mouseX * rotationRange);
+            
+            // 1. Target movement (moves slowly towards the player)
+            target.position.z += targetSpeed;
+            target.rotation.y += 0.01;
+            target.bbox.setFromObject(target);
+
+            // 2. Target Proximity Check (Life Loss Condition)
+            if (target.position.z > targetDangerZ) {
+                lives--;
+                updateHUD();
+                
+                if (lives <= 0) {
+                    // Game Over
+                    gameState = 'gameover';
+                    gameMessage.innerText = `GAME OVER! Final Score: ${score}\n\nPress 'S' to play again.`;
+                    startScreen.style.display = 'flex';
+                    // Remove all existing bullets
+                    bullets.forEach(b => scene.remove(b));
+                    bullets.length = 0;
+                    return; 
+                }
+                
+                // If not Game Over, just reset the target
+                resetTargetPosition();
+            }
+
+            // 3. Bullet update
+            updateBullets();
+        }
+
+        // --- Rendering Loop ---
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            updateGame();
+
+            renderer.render(scene, camera);
+        }
+
+        // --- Utility Functions ---
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // Start the initialization, but the game loop only runs when gameState is 'playing'
+        init();
+        animate();
+
+    </script>
+</body>
+</html>
