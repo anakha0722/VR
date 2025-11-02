@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hen Egg Catcher Game</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+            background: #f0f0f0;
+        }
+        #gameCanvas {
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-size: 20px;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
+        }
+        #startScreen {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 30px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+        #gameOverScreen {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 30px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <div id="ui">
+        <div>Lives: <span id="lives">3</span></div>
+        <div>Score: <span id="score">0</span></div>
+    </div>
+    <div id="startScreen">
+        Press S to Start
+    </div>
+    <div id="gameOverScreen">
+        Game Over<br>Press R to Restart
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // Game variables
+        let scene, camera, renderer, hen, basket, eggs = [], lives = 3, score = 0, gameStarted = false, gameOver = false;
+        const henSpeed = 0.1, basketSpeed = 0.1, eggSpeed = 0.05;
+
+        // Initialize Three.js
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('gameCanvas') });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+            scene.add(ambientLight);
+            const light = new THREE.DirectionalLight(0xffffff, 1);
+            light.position.set(0, 1, 1);
+            scene.add(light);
+
+            // Top plane
+            const topPlaneGeometry = new THREE.PlaneGeometry(10, 10);
+            const topPlaneMaterial = new THREE.MeshBasicMaterial({ color: 0x8B4513, side: THREE.DoubleSide });
+            const topPlane = new THREE.Mesh(topPlaneGeometry, topPlaneMaterial);
+            topPlane.rotation.x = -Math.PI / 2;
+            topPlane.position.y = 2;
+            scene.add(topPlane);
+
+            // Bottom plane
+            const bottomPlaneGeometry = new THREE.PlaneGeometry(10, 10);
+            const bottomPlaneMaterial = new THREE.MeshBasicMaterial({ color: 0x228B22, side: THREE.DoubleSide });
+            const bottomPlane = new THREE.Mesh(bottomPlaneGeometry, bottomPlaneMaterial);
+            bottomPlane.rotation.x = -Math.PI / 2;
+            bottomPlane.position.y = -2;
+            scene.add(bottomPlane);
+
+            // Hen (simple cube)
+            const henGeometry = new THREE.BoxGeometry(1, 1, 1);
+            const henMaterial = new THREE.MeshBasicMaterial({ color: 0xFFFF00 });
+            hen = new THREE.Mesh(henGeometry, henMaterial);
+            hen.position.set(0, 2.5, 0);
+            scene.add(hen);
+
+            // Basket (simple box)
+            const basketGeometry = new THREE.BoxGeometry(2, 0.5, 1);
+            const basketMaterial = new THREE.MeshBasicMaterial({ color: 0x8B4513 });
+            basket = new THREE.Mesh(basketGeometry, basketMaterial);
+            basket.position.set(0, -1.75, 0);
+            scene.add(basket);
+
+            camera.position.set(0, 0, 10);
+            camera.lookAt(0, 0, 0);
+
+            // Event listeners
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('click', onClick);
+
+            animate();
+        }
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (gameStarted && !gameOver) {
+                // Move eggs
+                eggs.forEach((egg, index) => {
+                    egg.position.y -= eggSpeed;
+                    // Check collision with basket
+                    if (egg.position.y <= -1.75 && Math.abs(egg.position.x - basket.position.x) < 1) {
+                        score++;
+                        document.getElementById('score').innerText = score;
+                        scene.remove(egg);
+                        eggs.splice(index, 1);
+                    } else if (egg.position.y < -3) {
+                        lives--;
+                        document.getElementById('lives').innerText = lives;
+                        scene.remove(egg);
+                        eggs.splice(index, 1);
+                        if (lives <= 0) {
+                            gameOver = true;
+                            document.getElementById('gameOverScreen').style.display = 'block';
+                        }
+                    }
+                });
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // Key down handler
+        function onKeyDown(event) {
+            if (!gameStarted) {
+                if (event.key === 's' || event.key === 'S') {
+                    gameStarted = true;
+                    document.getElementById('startScreen').style.display = 'none';
+                }
+                return;
+            }
+            if (gameOver) {
+                if (event.key === 'r' || event.key === 'R') {
+                    restartGame();
+                }
+                return;
+            }
+
+            switch (event.key) {
+                case 'ArrowLeft':
+                    hen.position.x = Math.max(hen.position.x - henSpeed, -4);
+                    break;
+                case 'ArrowRight':
+                    hen.position.x = Math.min(hen.position.x + henSpeed, 4);
+                    break;
+                case 'a':
+                case 'A':
+                    basket.position.x = Math.max(basket.position.x - basketSpeed, -4);
+                    break;
+                case 'd':
+                case 'D':
+                    basket.position.x = Math.min(basket.position.x + basketSpeed, 4);
+                    break;
+            }
+        }
+
+        // Click handler for laying egg
+        function onClick() {
+            if (!gameStarted || gameOver) return;
+
+            const eggGeometry = new THREE.SphereGeometry(0.2);
+            const eggMaterial = new THREE.MeshBasicMaterial({ color: 0xFFFFFF });
+            const egg = new THREE.Mesh(eggGeometry, eggMaterial);
+            egg.position.set(hen.position.x, hen.position.y - 0.5, 0);
+            scene.add(egg);
+            eggs.push(egg);
+        }
+
+        // Restart game
+        function restartGame() {
+            lives = 3;
+            score = 0;
+            document.getElementById('lives').innerText = lives;
+            document.getElementById('score').innerText = score;
+            eggs.forEach(egg => scene.remove(egg));
+            eggs = [];
+            hen.position.x = 0;
+            basket.position.x = 0;
+            gameOver = false;
+            document.getElementById('gameOverScreen').style.display = 'none';
+        }
+
+        // Window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        init();
+    </script>
+</body>
+</html>
